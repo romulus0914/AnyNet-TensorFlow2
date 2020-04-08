@@ -13,7 +13,7 @@ config.ANYNET.STEM_WIDTHS = 32
 config.ANYNET.BLOCK_TYPE = 'residual_bottleneck_block'
 config.ANYNET.DEPTHS = [2, 5, 15, 1]
 config.ANYNET.WIDTHS = [80, 240, 720, 1920]
-config.ANYNET.STRIDES = [2, 2, 2, 2]
+config.ANYNET.STRIDES = [1, 2, 2, 2]
 config.ANYNET.BOTTLENECK_RATIOS = []
 config.ANYNET.NUM_GROUPS = []
 
