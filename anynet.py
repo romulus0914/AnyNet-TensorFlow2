@@ -25,14 +25,14 @@ def _GetBlock(block_type):
 
     return blocks[block_type]
 
-def Conv2D(widths, kernel_size, stride, padding):
+def Conv2D(widths, kernel_size, stride, padding, use_bias=False):
 
     return layers.Conv2D(
         widths,
         kernel_size=kernel_size,
         strides=stride,
         padding=padding,
-        use_bias=False,
+        use_bias=use_bias,
         kernel_initializer=tf.keras.initializers.VarianceScaling(2.0, 'fan_out'),
     )
 
@@ -92,12 +92,12 @@ class SimpleStemImagenet(layers.Layer):
 class VanillaBlock(layers.Layer):
     """ Vanilla Block: [3x3 Conv, BN, ReLU] x 2 """
 
-    def __init__(self, widths, stride, bottleneck_ratio=None, num_groups=None, name='vanilla_block'):
+    def __init__(self, in_widths, out_widths, stride, bottleneck_ratio=None, num_groups=None, se_ratio=None, name='vanilla_block'):
         super(VanillaBlock, self).__init__(name=name)
 
         assert (
-            bottleneck_ratio is None and num_groups is None
-        ), 'Residual basic block does not support bottleneck layers or group convolutions.'
+            bottleneck_ratio is None and num_groups is None and se_ratio is None
+        ), 'vanilla block does not support bottleneck layers, group convolutions or squueze and excitation.'
 
         self.block = tf.keras.Sequential([
             # 3x3 Conv, BN, ReLU
@@ -117,26 +117,26 @@ class VanillaBlock(layers.Layer):
 class ResidualBasicBlock(layers.Layer):
     """ Residual basic block x + F(x), F = [3x3 Conv, BN, ReLU] x 2 """
 
-    def __init__(self, widths, stride, projection, bottleneck_ratio=None, num_groups=None, name='residual_basic_block'):
+    def __init__(self, in_widths, out_widths, stride, projection, bottleneck_ratio=None, num_groups=None, se_ratio=None, name='residual_basic_block'):
         super(ResidualBasicBlock, self).__init__(name=name)
 
         assert (
-            bottleneck_ratio is None and num_groups is None
-        ), 'Residual basic block does not support bottleneck layers or group convolutions.'
+            bottleneck_ratio is None and num_groups is None and se_ratio is None
+        ), 'Residual basic block does not support bottleneck layers, group convolutions or squueze and excitation.'
 
         self.block = tf.keras.Sequential([
             # 3x3 Conv, BN, ReLU
-            Conv2D(widths, 3, stride, 'same'),
+            Conv2D(out_widths, 3, stride, 'same'),
             BatchNormalization(),
             layers.ReLU(),
             # 3x3 Conv, BN
-            Conv2D(widths, 3, 1, 'same'),
+            Conv2D(out_widths, 3, 1, 'same'),
             BatchNormalization()
         ])
 
         if projection:
             self.residual_connection = tf.keras.Sequential([
-                Conv2D(widths, 1, stride, 'valid'),
+                Conv2D(out_widths, 1, stride, 'valid'),
                 BatchNormalization()
             ]) 
         else:
@@ -168,31 +168,49 @@ class GroupConv2D(layers.Layer):
 
         return x
 
+class SqueezeExcitation(layers.Layer):
+    def __init__(self, widths, se_widths, name='squeeze_excitation'):
+        super(SqueezeExcitation, self).__init__(name=name)
+
+        self.se = tf.keras.Sequential([
+            Conv2D(se_widths, 1, 1, 'valid', True),
+            layers.ReLU(),
+            Conv2D(widths, 1, 1, 'valid', True),
+            layers.Activation('sigmoid')
+        ])
+
+    def call(self, x, training=True):
+        return x * self.se(tf.reduce_mean(x, [1, 2], keepdims=True))
+
 class ResidualBottleneckBlock(layers.Layer):
     """ Residual bottleneck block: x + F(x), F = [1x1 Conv, 3x3 Conv, 1x1 Conv] """
 
-    def __init__(self, widths, stride, projection, bottleneck_ratio=1.0, num_groups=1, name='residual_bottleneck_block'):
+    def __init__(self, in_widths, out_widths, stride, projection, bottleneck_ratio=1.0, num_groups=1, se_ratio=0.25, name='residual_bottleneck_block'):
         super(ResidualBottleneckBlock, self).__init__(name=name)
 
-        bottleneck_widths = int(round(widths*bottleneck_ratio))
+        bottleneck_widths = int(round(out_widths*bottleneck_ratio))
+        if se_ratio:
+            se_widths = int(round(in_widths*se_ratio))
 
         self.block = tf.keras.Sequential([
             # 1x1 Conv, BN, ReLU
-            Conv2D(widths, 1, 1, 'valid'),
+            Conv2D(bottleneck_widths, 1, 1, 'valid'),
             BatchNormalization(),
             layers.ReLU(),
             # 3x3 Conv, BN, ReLU
             GroupConv2D(bottleneck_widths, stride, num_groups),
             BatchNormalization(),
             layers.ReLU(),
+            # SE
+            SqueezeExcitation(bottleneck_widths, se_widths) if se_ratio else layers.Activation('linear'),
             # 1x1 Conv, BN, ReLU
-            Conv2D(widths, 1, 1, 'valid'),
+            Conv2D(out_widths, 1, 1, 'valid'),
             BatchNormalization()
         ])
 
         if projection:
             self.residual_connection = tf.keras.Sequential([
-                Conv2D(widths, 1, stride, 'valid'),
+                Conv2D(out_widths, 1, stride, 'valid'),
                 BatchNormalization()
             ]) 
         else:
@@ -224,14 +242,15 @@ class AnyHead(layers.Layer):
 class AnyStage(layers.Layer):
     """ AnyNet stage (sequence of blocks w/ the same output shape) """
 
-    def __init__(self, depths, widths_in, widths_out, stride, bottleneck_ratio, num_groups, block, name='stage'):
+    def __init__(self, depths, in_widths, out_widths, stride, bottleneck_ratio, num_groups, se_ratio, block, name='stage'):
         super(AnyStage, self).__init__(name=name)
 
         self.blocks = tf.keras.Sequential()
         for d in range(depths):
             block_stride = stride if d == 0 else 1
-            projection = True if d == 0 and (widths_in != widths_out or block_stride != 1) else False
-            self.blocks.add(block(widths_out, block_stride, projection, bottleneck_ratio, num_groups, 'block_{}'.format(d)))
+            projection = True if d == 0 and (in_widths != out_widths or block_stride != 1) else False
+            widths = in_widths if d == 0 else out_widths
+            self.blocks.add(block(widths, out_widths, block_stride, projection, bottleneck_ratio, num_groups, se_ratio, 'block_{}'.format(d)))
 
     def call(self, x, training=True):
         return self.blocks(x, training=training)
@@ -253,14 +272,28 @@ class AnyNet(tf.keras.Model):
 
         # stages
         block = _GetBlock(config.ANYNET.BLOCK_TYPE)
-        brs = config.ANYNET.BOTTLENECK_RATIOS if config.ANYNET.BOTTLENECK_RATIOS else [1.0 for _ in config.ANYNET.WIDTHS]
-        ngs = config.ANYNET.NUM_GROUPS if config.ANYNET.NUM_GROUPS else [1 for _ in config.ANYNET.WIDTHS]
-        stage_params = list(zip(config.ANYNET.DEPTHS, config.ANYNET.WIDTHS, config.ANYNET.STRIDES, brs, ngs))
+        if config.ANYNET.BOTTLENECK_RATIOS is None:
+            brs = [None for _ in config.ANYNET.WIDTHS]
+        elif len(config.ANYNET.BOTTLENECK_RATIOS) == 0:
+            brs = [1.0 for _ in config.ANYNET.WIDTHS]
+        else:
+            brs = config.ANYNET.BOTTLENECK_RATIOS
+        if config.ANYNET.NUM_GROUPS is None:
+            ngs = [None for _ in config.ANYNET.WIDTHS]
+        elif len(config.ANYNET.NUM_GROUPS) == 0:
+            ngs = [1 for _ in config.ANYNET.WIDTHS]
+        else:
+            ngs = config.ANYNET.NUM_GROUPS
+        if config.ANYNET.SE_RATIO is None:
+            sers = [None for _ in config.ANYNET.WIDTHS]
+        else:
+            sers = [config.ANYNET.SE_RATIO for _ in config.ANYNET.WIDTHS]
+        stage_params = list(zip(config.ANYNET.DEPTHS, config.ANYNET.WIDTHS, config.ANYNET.STRIDES, brs, ngs, sers))
 
         self.stages = tf.keras.Sequential()
         prev_widths = config.ANYNET.STEM_WIDTHS
-        for i, (depths, widths, stride, bottleneck_ratio, num_groups) in enumerate(stage_params):
-            self.stages.add(AnyStage(depths, prev_widths, widths, stride, bottleneck_ratio, num_groups, block, 'stage_{}'.format(i)))
+        for i, (depths, widths, stride, bottleneck_ratio, num_groups, se_ratio) in enumerate(stage_params):
+            self.stages.add(AnyStage(depths, prev_widths, widths, stride, bottleneck_ratio, num_groups, se_ratio, block, 'stage_{}'.format(i)))
             prev_widths = widths
 
         # head

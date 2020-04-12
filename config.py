@@ -16,6 +16,7 @@ config.ANYNET.WIDTHS = [80, 240, 720, 1920]
 config.ANYNET.STRIDES = [1, 2, 2, 2]
 config.ANYNET.BOTTLENECK_RATIOS = []
 config.ANYNET.NUM_GROUPS = []
+config.ANYNET.SE_RATIO = 0.25
 
 # batch normalization parameters
 config.BN = edict()
