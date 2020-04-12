@@ -145,10 +145,10 @@ class ResidualBasicBlock(layers.Layer):
         self.relu = layers.ReLU()
 
     def call(self, x, training=True):
-            x = self.block(x, training=training) + self.residual_connection(x, training=training)
-            x = self.relu(x)
+        x = self.block(x, training=training) + self.residual_connection(x, training=training)
+        x = self.relu(x)
 
-            return x
+        return x
 
 class GroupConv2D(layers.Layer):
     def __init__(self, widths, stride, num_groups, name='group_conv_2d'):
@@ -219,10 +219,10 @@ class ResidualBottleneckBlock(layers.Layer):
         self.relu = layers.ReLU()
 
     def call(self, x, training=True):
-            x = self.block(x, training=training) + self.residual_connection(x, training=training)
-            x = self.relu(x)
+        x = self.block(x, training=training) + self.residual_connection(x, training=training)
+        x = self.relu(x)
 
-            return x
+        return x
 
 class AnyHead(layers.Layer):
     """ AnyNet head """
